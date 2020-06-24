@@ -1,12 +1,19 @@
 package com.realtime.websocket.config.websocket;
 
+import com.google.common.cache.CacheBuilder;
+import com.google.common.cache.CacheLoader;
+import com.google.common.cache.LoadingCache;
 import org.springframework.stereotype.Component;
+import org.springframework.util.StringUtils;
 import org.springframework.web.socket.*;
 
+import javax.annotation.Resource;
 import java.io.IOException;
 import java.util.HashMap;
 import java.util.Iterator;
 import java.util.Map;
+import java.util.concurrent.ConcurrentMap;
+import java.util.concurrent.ExecutorService;
 
 /**
  * @author: Staro
@@ -16,14 +23,37 @@ import java.util.Map;
 @Component
 public class CustomWebSocketHandler implements WebSocketHandler {
 
-    private static final Map<String, WebSocketSession> userMap = new HashMap<>();
+    private WebSocketSession socketSession;
+
+    private  LoadingCache<String,Map<String,WebSocketSession>> webSocketSessionCache=CacheBuilder
+            .newBuilder()
+            .concurrencyLevel(60)   //允许并发更新数
+            .initialCapacity(1)     //初始化容量
+            .maximumSize(1)         //最大容量
+            .recordStats()
+            .removalListener(removalNotification -> System.out.println(removalNotification.getKey() + " was removed, cause is " + removalNotification.getCause()))
+            .build(new CacheLoader<String, Map<String,WebSocketSession>>() {
+                @Override
+                public Map<String,WebSocketSession> load(String jspCode) throws Exception {
+                    if (!StringUtils.isEmpty(jspCode)){
+                        Map<String,WebSocketSession> map=new HashMap<>();
+                        map.put(socketSession.getId(),socketSession);
+                        return map;
+                    }
+                    return null;
+                }
+            });
+
+    @Resource
+    private ExecutorService executorService;
 
     @Override
     public void afterConnectionEstablished(WebSocketSession webSocketSession) throws Exception {
+        this.socketSession=webSocketSession;
         String jspCode = (String) webSocketSession.getAttributes().get("jspCode");
         if (jspCode != null) {
-            System.out.println(jspCode);
-            userMap.put(jspCode, webSocketSession);
+            Map<String, WebSocketSession> map = webSocketSessionCache.get(jspCode);
+            map.putIfAbsent(webSocketSession.getId(), webSocketSession);
         }
     }
 
@@ -39,7 +69,14 @@ public class CustomWebSocketHandler implements WebSocketHandler {
 
     @Override
     public void afterConnectionClosed(WebSocketSession webSocketSession, CloseStatus closeStatus) throws Exception {
-
+        ConcurrentMap<String, Map<String, WebSocketSession>> concurrentMap = webSocketSessionCache.asMap();
+        Iterator<Map.Entry<String, Map<String, WebSocketSession>>> iterator = concurrentMap.entrySet().iterator();
+        while (iterator.hasNext()){
+            Map.Entry<String, Map<String, WebSocketSession>> next = iterator.next();
+            Map<String, WebSocketSession> value = next.getValue();
+            value.remove(webSocketSession.getId());
+        }
+        System.out.println("connectionClose");
     }
 
     @Override
@@ -47,23 +84,21 @@ public class CustomWebSocketHandler implements WebSocketHandler {
         return false;
     }
 
-    public void sendMsgToJsp(final TextMessage message,String type)throws Exception{
-        Iterator<Map.Entry<String, WebSocketSession>> iterator = userMap.entrySet().iterator();
+
+    public void sendMsgToJsp(final TextMessage message, String type) throws Exception {
+        ConcurrentMap<String, Map<String, WebSocketSession>> concurrentMap = webSocketSessionCache.asMap();
+        Map<String, WebSocketSession> map = concurrentMap.get(type);
+        Iterator<Map.Entry<String, WebSocketSession>> iterator = map.entrySet().iterator();
         while (iterator.hasNext()){
-            final Map.Entry<String, WebSocketSession> entry = iterator.next();
-            System.out.println(entry.getValue().isOpen());
-            System.out.println(entry.getKey().contains(type));
-            if (entry.getValue().isOpen()&&entry.getKey().contains(type)){
-                new Thread(new Runnable() {
-                    @Override
-                    public void run() {
-                        try{
-                            entry.getValue().sendMessage(message);
-                        }catch(IOException e){
-                            e.printStackTrace();
-                        }
+            Map.Entry<String, WebSocketSession> next = iterator.next();
+            if (next.getValue().isOpen()){
+                executorService.execute(()->{
+                    try {
+                        next.getValue().sendMessage(message);
+                    } catch (IOException e) {
+                        e.printStackTrace();
                     }
-                }).start();
+                });
             }
         }
     }

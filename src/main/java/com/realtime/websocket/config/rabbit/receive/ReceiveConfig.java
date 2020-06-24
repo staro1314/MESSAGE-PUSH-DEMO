@@ -19,7 +19,6 @@ public class ReceiveConfig {
 
     @RabbitListener(queues = "queue")
     public void receive(String msg)throws Exception{
-        System.out.println(msg);
         webSocketHandler.sendMsgToJsp(new TextMessage(msg),QueueConfig.QUEUE);
     }
 }
